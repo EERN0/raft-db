@@ -71,11 +71,14 @@ public class Raft {
         resetElectionTimerLocked();
         String port = System.getProperty("server.port");
         me = "localhost:" + port;
-        rpcServer = new RpcServer(8775, this);
+        rpcServer = new RpcServer(Integer.parseInt(port), this);
         rpcClient = new RpcClient();
         peers = new ArrayList<>();
         peers.add("localhost:8775");
         peers.add("localhost:8776");
+        peers.add("localhost:8777");
+        peers.add("localhost:8778");
+        peers.add("localhost:8779");
     }
 
     private void threadPoolInit() {
@@ -193,7 +196,7 @@ public class Raft {
             }
             // 当前节点投过票
             if (StringUtils.isNotEmpty(votedFor)) {
-                log.info("<- S{}, Reject, Already voted for S{}", args.getCandidateId(), votedFor);
+                log.info("{}, Reject, Already voted for {}", args.getCandidateId(), votedFor);
                 return reply;
             }
 
