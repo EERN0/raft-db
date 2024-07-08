@@ -12,7 +12,7 @@ public class AppendEntriesArgs implements Serializable {
 
     // leader任期
     private long term;
-    private int leaderId;
+    private String leaderId;
 
     /**
      * leader日志中的前一个条目的索引，用于检查是否与follower冲突

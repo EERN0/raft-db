@@ -2,11 +2,13 @@ package ck.top.raft.server.proto;
 
 import lombok.Data;
 
+import java.io.Serializable;
+
 /**
  * 要票rpc响应体
  */
 @Data
-public class RequestVoteReply {
+public class RequestVoteReply implements Serializable {
 
     // 候选者任期, 即处理rpc请求节点的任期号
     private long term;
