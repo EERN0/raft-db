@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Random;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -26,6 +27,7 @@ public class Raft {
     public boolean isKilled = false;
 
     public ReentrantLock lock = new ReentrantLock();
+    public ReentrantLock appendLock = new ReentrantLock();
 
     // 角色，默认为follower
     public volatile Role role = Role.FOLLOWER;
@@ -49,6 +51,8 @@ public class Raft {
     // 定时任务
     private ScheduledExecutorService scheduler;
 
+    private final AtomicBoolean isReplicationScheduled = new AtomicBoolean(false);
+
     // 领导者选举定时任务
     private ElectionTicker electionTicker;
     // 心跳、日志复制定时任务
@@ -64,10 +68,30 @@ public class Raft {
         threadPoolInit();
         // 重置选举随机超时时间
         resetElectionTimerLocked();
-        // 启动领导选举，时间间隔 500ms
-        scheduler.scheduleAtFixedRate(electionTicker, 0, 600, TimeUnit.MILLISECONDS);
 
         log.info("Raft node started successfully. The current term is {}", currentTerm);
+        while (true) {
+            lock.lock();
+            try {
+                // 不是leader 且 选举超时了，节点成为candidate，发起选举
+                if (role != Role.LEADER && isElectionTimeoutLocked()) {
+                    becomeCandidateLocked();
+                    log.info("发起选举");
+                    CompletableFuture.runAsync(() -> electionTicker.startElection(currentTerm), electionExecutor);
+                }
+            } finally {
+                lock.unlock();
+            }
+            try {
+                int rand = new Random().nextInt(300) + 300;
+                Thread.sleep(rand);
+            } catch (InterruptedException e) {
+                throw new RuntimeException(e);
+            }
+        }
+        // 启动领导选举，时间间隔 500ms
+        //scheduler.scheduleAtFixedRate(electionTicker, 0, 600, TimeUnit.MILLISECONDS);
+
     }
 
     public void setConfig() {
@@ -222,6 +246,8 @@ public class Raft {
             }
             // 要票节点的任期 > 当前节点任期，当前节点变为follower
             if (args.getTerm() > currentTerm) {
+                log.info("变为follower++++++++++++++");
+                log.info("要票节点 {}-T{} > 当前节点 {}-T{}", args.getCandidateId(), args.getTerm(), me, currentTerm);
                 becomeFollowerLocked(args.getTerm());
             }
             // 当前节点投过票
@@ -255,7 +281,7 @@ public class Raft {
      */
     public AppendEntriesReply appendEntries(AppendEntriesArgs args) {
         try {
-            lock.lock();
+            appendLock.lock();
             AppendEntriesReply reply = new AppendEntriesReply();
             reply.setTerm(currentTerm);
             reply.setSucceeded(false);
@@ -275,10 +301,10 @@ public class Raft {
             // TODO 日志复制
 
             // 当前节点认可对方是leader就要重置自己的选举时钟，不管日志匹配是否成功，避免leader和follower匹配日志时间过长
-            //resetElectionTimerLocked();
+            resetElectionTimerLocked();
             return reply;
         } finally {
-            lock.unlock();
+            appendLock.unlock();
         }
     }
 
@@ -304,7 +330,6 @@ public class Raft {
         }
 
         private void startElection(long term) {
-            log.info("发起选举");
             // 投票数
             AtomicInteger votes = new AtomicInteger(0);
             for (String peer : peers) {
@@ -334,6 +359,7 @@ public class Raft {
                                     return;
                                 }
                                 if (reply.getTerm() > currentTerm) {
+                                    log.info("变为follower---------------------");
                                     becomeFollowerLocked(reply.getTerm());
                                     return;
                                 }
@@ -341,12 +367,14 @@ public class Raft {
                                 if (reply.isVoteGranted()) {
                                     // 超过半数选票，成为leader
                                     if (votes.incrementAndGet() > peers.size() / 2) {
+                                        // TODO 第一次变为leader执行，只执行一次
                                         // 成为leader，异步执行定时任务，发送【心跳和日志同步】rpc
                                         log.info("{} 节点成为leader, 获得票数{}", args.getCandidateId(), votes.get());
                                         becomeLeaderLocked();
-                                        log.info("发送心跳，维持leader地位");
-                                        scheduler.scheduleWithFixedDelay(replicationTicker, 0, Constant.REPLICATE_INTERVAL * 2, TimeUnit.MILLISECONDS
-                                        );
+                                        if (isReplicationScheduled.compareAndSet(false, true)) {
+                                            log.info("发送心跳，维持leader地位");
+                                            scheduler.scheduleWithFixedDelay(replicationTicker, 0, Constant.REPLICATE_INTERVAL, TimeUnit.MILLISECONDS);
+                                        }
                                     }
                                 }
                             } finally {
@@ -375,18 +403,12 @@ public class Raft {
      * 当前节点是leader，向其它follower定时发送心跳、日志复制请求
      */
     class ReplicationTicker implements Runnable {
-        private final Semaphore semaphore = new Semaphore(1);
+        //private final Semaphore semaphore = new Semaphore(1);
 
         @Override
         public void run() {
             if (role == Role.LEADER) {
-                if (semaphore.tryAcquire()) {
-                    try {
-                        startReplication(currentTerm);
-                    } finally {
-                        semaphore.release();
-                    }
-                }
+                startReplication(currentTerm);
             }
         }
 
@@ -434,7 +456,7 @@ public class Raft {
             for (CompletableFuture<AppendEntriesReply> future : futures) {
 
                 AppendEntriesReply reply = future.join();
-                lock.lock();
+                appendLock.lock();
                 try {
                     if (reply == null) {
                         return;
@@ -448,7 +470,7 @@ public class Raft {
 
                     // TODO 处理leader和follower日志不匹配的情况（索引或任期不同）
                 } finally {
-                    lock.unlock();
+                    appendLock.unlock();
                 }
             }
         }
@@ -459,8 +481,8 @@ public class Raft {
         AppendEntriesReply reply;
         try {
             Request request = new Request(Request.APPEND_ENTRIES, args, peer);
-            log.info("leader-{} 给 {} 发送心跳rpc", args.getLeaderId(), peer);
             reply = rpcClient.send(request);
+            log.info("leader-{}-T{} 给 {}-T{} 发送心跳rpc", args.getLeaderId(), args.getTerm(), peer, reply.getTerm());
             return reply;
         } catch (Exception e) {
             return null;
