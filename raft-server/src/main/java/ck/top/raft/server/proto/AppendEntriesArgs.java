@@ -11,7 +11,7 @@ import java.io.Serializable;
 public class AppendEntriesArgs implements Serializable {
 
     // leader任期
-    private long term;
+    private int term;
     private String leaderId;
 
     /**
@@ -21,11 +21,11 @@ public class AppendEntriesArgs implements Serializable {
     private int preLogIndex = 0;
 
     // leader前一条日志的任期，用于检查term是否一致
-    private long preLogTerm = -1;
+    private int preLogTerm = -1;
 
     // 需要复制到follower日志中的新日志。可以是多个日志条目，也可以是空的（心跳）
     private LogEntry[] entries;
 
     // leader已提交的日志索引，通过rpc发给每个follower
-    private int leaderCommit;
+    private int leaderCommitIndex;
 }

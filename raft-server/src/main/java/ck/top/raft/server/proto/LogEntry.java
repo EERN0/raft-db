@@ -12,7 +12,7 @@ import java.io.Serializable;
 public class LogEntry implements Serializable {
 
     // 日志条目的任期
-    private int term = -1;
+    private int term = 0;
     // 日志条目索引
     private int index = 0;
 
@@ -20,4 +20,9 @@ public class LogEntry implements Serializable {
     private Object command;
     // 有效命令将被执行
     private boolean isValid;
+
+    public LogEntry(int index, int term) {
+        this.index = index;
+        this.term = term;
+    }
 }

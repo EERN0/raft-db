@@ -10,18 +10,16 @@ import java.io.Serializable;
  */
 @Data
 public class RequestVoteArgs implements Serializable {
-    // 候选者任期
-    private long term;
 
-    // 其它raft peer节点id，格式为ip:port
-    private String peerId;
+    // 候选者任期
+    private int term;
     // 候选者id, 格式为ip:port
     private String candidateId;
 
     // 最后一条日志索引
-    private long lastLogIndex;
+    private int lastLogIndex;
     // 最后一条日志任期
-    private long lastLogTerm;
+    private int lastLogTerm;
 
     public String toPrettyString() {
         return String.format("Candidate-%s, T%d, LastLogIdx: [%d]T%d", candidateId, term, lastLogIndex, lastLogTerm);

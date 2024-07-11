@@ -10,10 +10,10 @@ import java.io.Serializable;
 @Data
 public class RequestVoteReply implements Serializable {
 
-    // 候选者任期, 即处理rpc请求节点的任期号
-    private long term;
+    // 处理要票rpc请求的节点的任期，非candidate的任期
+    private int term;
 
-    // 候选者获得选票时为true，否则为false
+    // 节点投票给候选者时为true，否则为false
     private boolean voteGranted;
 
     public String toPrettyString() {

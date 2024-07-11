@@ -7,4 +7,8 @@ public class Constant {
 
     // 发送心跳、日志同步的时间间隔，小于选举超时下界
     public static final long REPLICATE_INTERVAL = 500;
+
+    // 设置0为无效日志索引、无效日志任期（有效日志和任期的索引均从1开始）
+    public static final int INVALID_LOG_INDEX = 0;
+    public static final int INVALID_LOG_TERM = 0;
 }
