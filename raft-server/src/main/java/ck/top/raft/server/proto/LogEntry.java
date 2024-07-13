@@ -17,7 +17,7 @@ public class LogEntry implements Serializable {
     private int index = 0;
 
     // 具体的命令
-    private Object command;
+    private Command command;
     // 有效命令将被执行
     private boolean isValid;
 

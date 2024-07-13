@@ -12,6 +12,7 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
 @Slf4j
@@ -35,14 +36,19 @@ public class Raft {
     // 每个节点本地的日志。日志索引+日志任期相同 ==> 日志相同（从日志开头到索引位置的日志都相同）
     private List<LogEntry> logs;
 
-    // 仅在leader中使用，每个peer节点的日志视图
-    private Map<String, Integer> nextLogIndex;     // leader下一次给peer发送的日志，索引的起始为nextLogIndex.get(peer)
-    private Map<String, Integer> matchLogIndex;    // matchLogIndex.get(peer): 节点peer已经复制的最高日志项的索引
+    // 仅在leader中使用，每个peer的日志视图
+    private Map<String, Integer> nextLogIndex;     // leader下一次给peer发送的日志，起始索引为nextLogIndex.get(peer)
+    private Map<String, Integer> matchLogIndex;    // matchLogIndex.get(peer): peer节点已经成功复制的日志条目最高索引
 
-    // 全局已提交日志的索引
+    // 全局已提交日志的索引，表示所有在此索引或更低索引的日志条目都已经被大多数节点成功复制，并且可以被安全地应用到状态机中
     int commitLogIndex;
     // 已经应用的日志索引
     int lastAppliedIndex;
+
+    // 日志应用的条件变量
+    private final Condition applyCond = lock.newCondition();
+    // 传递要应用到状态机的日志
+    private BlockingQueue<ApplyMsg> applyCh = new LinkedBlockingQueue<>();
 
     // 选举开始时间
     public long electionStart;
@@ -250,6 +256,42 @@ public class Raft {
     }
 
     /**
+     * 节点第一条任期为term的日志索引
+     *
+     * @param term 任期
+     * @return 第一条任期为term的日志索引 or 无效日志索引
+     */
+    public int firstLogIndexFor(int term) {
+        for (int i = 0; i < logs.size(); i++) {
+            if (logs.get(i).getTerm() == term) {
+                return i;
+            } else if (logs.get(i).getTerm() > term) {
+                break;
+            }
+        }
+        return Constant.INVALID_LOG_INDEX;
+    }
+
+    /**
+     * leader维护了每个peer已同步的日志索引matchLogIndex
+     * 使用排序后找中位数的方式，计算多数peer的匹配点，中位数表示有一半以上的节点已经成功复制了该索引或更低索引的日志条目
+     */
+    public int getMajorityMatchedLogIndexLocked() {
+        // 所有节点已经同步的日志索引
+        List<Integer> temp = new ArrayList<>(matchLogIndex.values());
+        // 排序后的中位数(中左)
+        Collections.sort(temp);
+        int majorityIdx = peers.size() / 2;
+        log.info("Matched index after sort: {}, majority[{}]={}", temp, majorityIdx, temp.get(majorityIdx));
+        return temp.get(majorityIdx);
+    }
+
+    public void persistLocked() {
+        return;
+    }
+
+
+    /**
      * 回调函数
      * 接收方收到candidate的要票rpc请求，执行该回调
      *
@@ -284,6 +326,8 @@ public class Raft {
 
             // 接收方节点的日志 新于 要票方candidate的日志
             if (isMoreUpToDateLocked(args.getLastLogIndex(), args.getLastLogTerm())) {
+                log.info("当前节点-{}-T{}的最后一条日志索引{} > {}-T{}的日志索引{}，拒绝投票给{}",
+                        me, currentTerm, logs.size() - 1, args.getCandidateId(), args.getTerm(), args.getLastLogIndex(), args.getCandidateId());
                 return reply;
             }
 
@@ -292,6 +336,7 @@ public class Raft {
             votedFor = args.getCandidateId();
 
             // TODO 节点 currentTerm || votedFor || log改变，都需要持久化 persistLocked()
+
             // 重置选举超时时间
             resetElectionTimerLocked();
 
@@ -316,7 +361,7 @@ public class Raft {
             reply.setTerm(currentTerm);
             reply.setSucceeded(false);
 
-            // 检查任期，心跳rpc的任期 和 当前节点(接收方)的任期
+            // 检查任期，心跳rpc的任期 和 本地节点(接收方follower)的任期
             if (args.getTerm() < currentTerm) {
                 // rpc请求中任期过小，丢弃这个请求
                 return reply;
@@ -325,14 +370,46 @@ public class Raft {
                 log.info("{}-{}-T{} 收到心跳rpc请求，认可{}-Leader-T{}的地位", me, role, currentTerm, args.getLeaderId(), args.getTerm());
                 becomeFollowerLocked(args.getTerm());
             }
-            // 是leader发来的心跳rpc，更新本地任期
-            reply.setTerm(args.getTerm());
-            reply.setSucceeded(true);
-            // TODO 日志复制
 
-            // 接受心跳rpc的节点(当前节点)认可对方是leader，重置自己的选举时钟，一段时间内不发起选举
+            // 本地接受心跳rpc，认可对方是leader，重置自己的选举时钟，一段时间内不发起选举
             // 不管日志匹配是否成功，避免leader和follower匹配日志时间过长
             resetElectionTimerLocked();
+
+            // 日志冲突(日志不匹配)：日志的索引 或 任期 不同
+            // 1、leader前一条日志索引 超出 本地节点的日志范围，说明leader倒数第二条日志就比follower的多
+            if (args.getPreLogIndex() >= logs.size()) {
+                // 设置冲突日志为无效任期0，冲突日志索引为logs.size()，下次让leader发送冲突索引及之后的所有日志条目，用来同步follower日志
+                reply.setConflictLogTerm(Constant.INVALID_LOG_TERM);
+                reply.setConflictLogIndex(logs.size());
+                return reply;
+            }
+            // 2、leader前一条日志的任期 不等于 本地节点的日志任期
+            if (args.getPreLogTerm() != logs.get(args.getPreLogIndex()).getTerm()) {
+                reply.setConflictLogTerm(logs.get(args.getPreLogIndex()).getTerm());
+                reply.setConflictLogIndex(firstLogIndexFor(reply.getConflictLogTerm()));
+                return reply;
+            }
+            // leader前一条日志匹配(索引idx)上了本地日志(索引idx)，本地节点同步leader的日志
+            // 清空本地日志[idx+1, size-1]的日志，复制leader传入的日志条目
+            logs.subList(args.getPreLogIndex() + 1, logs.size()).clear();
+            logs.addAll(args.getPreLogIndex() + 1, args.getEntries());
+            // TODO 日志持久化
+            persistLocked();
+
+            reply.setTerm(args.getTerm());
+            reply.setSucceeded(true);
+
+            // 本地节点根据leader最新的commit来更新自己的commit信息
+            if (args.getLeaderCommitIndex() > commitLogIndex) {
+                commitLogIndex = args.getLeaderCommitIndex();
+                // 确保commit日志索引不会超过
+                if (commitLogIndex >= logs.size()) {
+                    commitLogIndex = logs.size() - 1;
+                }
+            }
+            // 唤醒 日志应用 开始干活
+            applyCond.signalAll();
+
             return reply;
         } finally {
             lock.unlock();
@@ -446,15 +523,23 @@ public class Raft {
         }
 
         private void startReplication(int term) {
-            List<CompletableFuture<AppendEntriesReply>> futures = new ArrayList<>();
-
             for (String peer : peers) {
                 if (Objects.equals(peer, me)) {
+                    matchLogIndex.put(peer, logs.size() - 1);
+                    nextLogIndex.put(peer, logs.size());
                     continue;
                 }
+
+                Integer prevIdx = nextLogIndex.get(peer) - 1;
+                int prevTerm = logs.get(prevIdx).getTerm();
+
                 AppendEntriesArgs args = new AppendEntriesArgs();
                 args.setLeaderId(me);
                 args.setTerm(term);
+                args.setPreLogIndex(prevIdx);
+                args.setPreLogTerm(prevTerm);
+                args.setEntries(logs.subList(prevIdx + 1, logs.size()));
+                args.setLeaderCommitIndex(commitLogIndex);
 
                 // 上下文检查，异步请求和响应之间，检查当前节点角色、任期是否改变
                 if (contextLostLocked(Role.LEADER, term)) {
@@ -477,35 +562,52 @@ public class Raft {
                                 }
                                 log.info("{}-{}-T{} 收到来自 {}-T{} 的心跳响应", args.getLeaderId(), role, args.getTerm(), peer, reply.getTerm());
 
-                                // TODO 处理leader和follower日志不匹配的情况（索引或任期不同）
+                                // 处理leader和follower日志冲突
+                                if (!reply.isSucceeded()) {
+                                    // leader下一次发给peer日志复制的起始索引
+                                    Integer nextIdx = nextLogIndex.get(peer);
+
+                                    // 1、follower返回的冲突任期是无效任期，follower日志数量少了(leader倒数第二条及以前的日志数 多于 follower的日志数)
+                                    if (reply.getConflictLogTerm() == Constant.INVALID_LOG_TERM) {
+                                        // leader下次发给peer的日志同步请求中，起始索引为follower最后一条日志索引+1，以便从follower日志的末尾开始同步日志
+                                        nextIdx = reply.getConflictLogIndex();
+                                    } else {
+                                        // 2、日志数量没少，但是任期没对上，说明leader和follower的日志在某个点之后不一样了，跳过冲突任期的所有日志
+                                        // raft中，一段连续的相同任期的日志条目要么全部匹配，要么全部不匹配。日志不匹配，回退当前任期的全部日志，直到前面任期不同的日志或者移动到日志的起始位置
+                                        // leader查找冲突任期的第一条日志
+                                        int firstLogIdx = firstLogIndexFor(reply.getConflictLogTerm());
+                                        if (firstLogIdx != Constant.INVALID_LOG_INDEX) {
+                                            // leader下一次的日志同步，把所有冲突任期的日志都发一遍
+                                            nextLogIndex.put(peer, firstLogIdx);
+                                        } else {
+                                            // leader日志中不存在冲突任期的任何日志，以follower的日志为准跳过冲突任期
+                                            nextLogIndex.put(peer, reply.getConflictLogIndex());
+                                        }
+                                    }
+                                    // 存在网络分区，避免超时的响应到达，更新了nextIdx
+                                    if (nextLogIndex.get(peer) > nextIdx) {
+                                        nextLogIndex.put(peer, nextIdx);
+                                    }
+                                    return;
+                                }
+                                // leader跟踪每个peer日志复制的进度，follower完成日志同步后(成功追加了日志)，leader更新matchLogIndex和nextLogIndex
+                                matchLogIndex.put(peer, args.getPreLogIndex() + args.getEntries().size());  // follower已经复制日志最后的索引
+                                nextLogIndex.put(peer, matchLogIndex.get(peer) + 1);                        // leader下一次发送日志同步请求的索引
+
+                                // leader确定日志条目已经被大多数节点成功复制时，标记该日志条目为已提交，更新commitIndex
+                                int majorityMatchedIdx = getMajorityMatchedLogIndexLocked();
+                                if (majorityMatchedIdx > commitLogIndex && logs.get(majorityMatchedIdx).getTerm() == currentTerm) {
+                                    log.info("Leader update the commit index {}->{}", commitLogIndex, majorityMatchedIdx);
+                                    // leader更新commitLogIndex为多数派的匹配点
+                                    commitLogIndex = majorityMatchedIdx;
+                                    // 一旦commitLogIndex被更新，leader就会将所有索引小于等于commitLogIndex的日志标记为已提交，应用到leader的状态机
+                                    applyCond.signalAll();
+                                }
                             } finally {
                                 lock.unlock();
                             }
                         }, electionExecutor);
-
-                //CompletableFuture<AppendEntriesReply> future = CompletableFuture.supplyAsync(() -> replicateToPeer(peer, args), electionExecutor);
-                //futures.add(future);
             }
-            //for (CompletableFuture<AppendEntriesReply> future : futures) {
-            //
-            //    AppendEntriesReply reply = future.join();
-            //    appendLock.lock();
-            //    try {
-            //        if (reply == null) {
-            //            return;
-            //        }
-            //        if (reply.getTerm() > currentTerm) {
-            //            log.info("follower任期T{} 大于 leader任期T{}, {}->follower", reply.getTerm(), currentTerm, role);
-            //            becomeFollowerLocked(reply.getTerm());
-            //            return;
-            //        }
-            //        log.info("{}-{} 收到来自 {} 的心跳响应", me, role, "xxx");
-            //
-            //        // TODO 处理leader和follower日志不匹配的情况（索引或任期不同）
-            //    } finally {
-            //        appendLock.unlock();
-            //    }
-            //}
         }
     }
 
