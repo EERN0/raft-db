@@ -12,7 +12,7 @@ public class Request implements Serializable {
     // 心跳、日志同步请求
     public static final int APPEND_ENTRIES = 1;
     // 客户端请求
-    public static final int CLIENT_REQ = 2;
+    public static final int CLIENT_REQUEST = 2;
 
     // 请求类型
     private int cmd = -1;

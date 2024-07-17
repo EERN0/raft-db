@@ -69,7 +69,7 @@ public class Raft {
 
 
     // 心跳、日志复制定时任务
-    private ReplicationTicker replicationTicker;
+    private final ReplicationTicker replicationTicker;
 
     public Raft() {
         electionStart = System.currentTimeMillis();
@@ -89,6 +89,8 @@ public class Raft {
         log.info("Raft node started successfully. The current term is {}", currentTerm);
 
         CompletableFuture.runAsync(this::electionTicker);
+
+        CompletableFuture.runAsync(this::applicationTicker);
     }
 
     public void setConfig() {
@@ -139,7 +141,7 @@ public class Raft {
                 return t;
             }
         };
-        electionExecutor = new ThreadPoolExecutor(cpu, maxPoolSize, keepAlive, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<Runnable>(queueSize));
+        electionExecutor = new ThreadPoolExecutor(cpu, maxPoolSize, keepAlive, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>(queueSize));
         //electionExecutor = new ThreadPoolExecutor(4, 4, keepAlive, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<Runnable>(queueSize));
         //electionExecutor = new NamedThreadPoolExecutor(cpu, maxPoolSize, keepAlive, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<Runnable>(queueSize), namedThreadFactory, "electionThreadPool");
         //heartExecutor = new NamedThreadPoolExecutor(cpu, maxPoolSize, keepAlive, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<Runnable>(queueSize), namedThreadFactory2, "electionThreadPool");
@@ -408,13 +410,23 @@ public class Raft {
                 }
             }
             // 唤醒 日志应用 开始干活
-            applyCond.signalAll();
+            applyCond.signal();
 
             return reply;
         } finally {
             lock.unlock();
         }
     }
+
+
+    /**
+     * 回调函数
+     * leader处理客户端请求，把客户端命令转成日志，应用到状态机
+     */
+    public ClientResponse clientRequest(ClientRequest obj) {
+        return null;
+    }
+
 
     /**
      * 领导者选举的定时任务
@@ -530,7 +542,7 @@ public class Raft {
                     continue;
                 }
 
-                Integer prevIdx = nextLogIndex.get(peer) - 1;
+                int prevIdx = nextLogIndex.get(peer) - 1;
                 int prevTerm = logs.get(prevIdx).getTerm();
 
                 AppendEntriesArgs args = new AppendEntriesArgs();
@@ -538,7 +550,7 @@ public class Raft {
                 args.setTerm(term);
                 args.setPreLogIndex(prevIdx);
                 args.setPreLogTerm(prevTerm);
-                args.setEntries(logs.subList(prevIdx + 1, logs.size()));
+                args.setEntries(new ArrayList<>(logs.subList(prevIdx + 1, logs.size())));
                 args.setLeaderCommitIndex(commitLogIndex);
 
                 // 上下文检查，异步请求和响应之间，检查当前节点角色、任期是否改变
@@ -601,7 +613,7 @@ public class Raft {
                                     // leader更新commitLogIndex为多数派的匹配点
                                     commitLogIndex = majorityMatchedIdx;
                                     // 一旦commitLogIndex被更新，leader就会将所有索引小于等于commitLogIndex的日志标记为已提交，应用到leader的状态机
-                                    applyCond.signalAll();
+                                    applyCond.signal();
                                 }
                             } finally {
                                 lock.unlock();
@@ -618,11 +630,23 @@ public class Raft {
             Request request = new Request(Request.APPEND_ENTRIES, args, peer);
             reply = rpcClient.send(request);
             log.info("{}-{}-T{} 发送心跳rpc 给 {}-T{}", args.getLeaderId(), role, args.getTerm(), peer, reply.getTerm());
-
-            //log.info("leader-{}-T{} 给 {}-T{} 发送心跳rpc", args.getLeaderId(), args.getTerm(), peer, reply.getTerm());
             return reply;
         } catch (Exception e) {
             return null;
+        }
+    }
+
+    private void applicationTicker() {
+        while (true) {
+            lock.lock();
+            try {
+                List<LogEntry> entries = new ArrayList<>();
+                for (int i = lastAppliedIndex + 1; i <= commitLogIndex; i++) {
+                    entries.add(logs.get(i));
+                }
+            } finally {
+                lock.unlock();
+            }
         }
     }
 }

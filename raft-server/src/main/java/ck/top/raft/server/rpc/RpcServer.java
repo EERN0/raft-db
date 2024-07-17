@@ -1,6 +1,7 @@
 package ck.top.raft.server.rpc;
 
 import ck.top.raft.server.proto.AppendEntriesArgs;
+import ck.top.raft.server.proto.ClientRequest;
 import ck.top.raft.server.proto.Raft;
 import ck.top.raft.server.proto.RequestVoteArgs;
 import com.alipay.remoting.BizContext;
@@ -45,12 +46,9 @@ public class RpcServer {
             return new Response<>(rf.requestVote((RequestVoteArgs) request.getObj()));
         } else if (request.getCmd() == Request.APPEND_ENTRIES) {
             return new Response<>(rf.appendEntries((AppendEntriesArgs) request.getObj()));
+        } else if (request.getCmd() == Request.CLIENT_REQUEST) {
+            return new Response<>(rf.clientRequest((ClientRequest) request.getObj()));
         }
-        //else if (request.getCmd() == Request.CLIENT_REQ) {
-        //    return new Response<>(node.propose((ClientRequest) request.getObj()));
-        //} else if (request.getCmd() == Request.FOLLOWER_SYNC){
-        //    return new Response<>(node.handleSyncRequest((SyncParam) request.getObj()));
-        //}
         return null;
     }
 
