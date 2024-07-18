@@ -1,9 +1,11 @@
 package ck.top.raft.server.proto;
 
+import lombok.Builder;
 import lombok.Data;
 
 import java.io.Serializable;
 
+@Builder
 @Data
 public class ClientRequest implements Serializable {
 
@@ -19,6 +21,4 @@ public class ClientRequest implements Serializable {
     // 键值对
     private String key;
     private String value;
-
-
 }

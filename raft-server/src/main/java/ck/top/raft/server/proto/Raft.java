@@ -2,12 +2,14 @@ package ck.top.raft.server.proto;
 
 import ck.top.raft.common.constant.Constant;
 import ck.top.raft.common.enums.Role;
+import ck.top.raft.server.kv.SkipList;
 import ck.top.raft.server.rpc.Request;
 import ck.top.raft.server.rpc.RpcClient;
 import ck.top.raft.server.rpc.RpcServer;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 
+import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -18,20 +20,24 @@ import java.util.concurrent.locks.ReentrantLock;
 @Slf4j
 public class Raft {
     // 当前节点地址，格式{ip:port}
-    public String me;
+    private String me;
     // 所有节点的地址
-    public List<String> peers;
-    // 当前节点状态
-    public boolean isKilled = false;
+    private List<String> peers;
+    // 当前任期的leader的地址
+    private String leaderId;
 
-    public ReentrantLock lock = new ReentrantLock();
+    private final ReentrantLock lock = new ReentrantLock();
 
     // 角色，默认为follower
-    public volatile Role role = Role.FOLLOWER;
+    private volatile Role role = Role.FOLLOWER;
     // 节点当前的任期
-    public volatile int currentTerm = 1;
+    private volatile int currentTerm = 1;
     // 节点在当前任期投票给voteFor
-    public volatile String votedFor;
+    private volatile String votedFor;
+
+    // 状态持久化
+    private RaftState raftState;
+    private Persister persister;
 
     // 每个节点本地的日志。日志索引+日志任期相同 ==> 日志相同（从日志开头到索引位置的日志都相同）
     private List<LogEntry> logs;
@@ -67,6 +73,8 @@ public class Raft {
 
     private final AtomicBoolean isReplicationScheduled = new AtomicBoolean(false);
 
+    // KV存储引擎
+    SkipList<String, String> skipList = SkipList.getInstance();
 
     // 心跳、日志复制定时任务
     private final ReplicationTicker replicationTicker;
@@ -99,11 +107,7 @@ public class Raft {
         rpcServer = new RpcServer(Integer.parseInt(port), this);
         rpcClient = new RpcClient();
         peers = new ArrayList<>();
-        peers.add("localhost:9991");
-        peers.add("localhost:9992");
-        peers.add("localhost:9993");
-        peers.add("localhost:9994");
-        peers.add("localhost:9995");
+        Collections.addAll(peers, "localhost:9991", "localhost:9992", "localhost:9993", "localhost:9994", "localhost:9995");
 
         // 初始化leader日志视图，leader掌握所有peer的日志视图
         nextLogIndex = new HashMap<>(peers.size());
@@ -121,16 +125,6 @@ public class Raft {
         int queueSize = 1024;
         long keepAlive = 2000 * 60;
 
-        //ThreadFactory namedThreadFactory = new ThreadFactory() {
-        //    private final AtomicInteger threadNum = new AtomicInteger(1);
-        //
-        //    @Override
-        //    public Thread newThread(Runnable r) {
-        //        Thread t = new Thread(r);
-        //        t.setName("election-thread-" + threadNum.getAndIncrement());
-        //        return t;
-        //    }
-        //};
         ThreadFactory namedThreadFactory2 = new ThreadFactory() {
             private final AtomicInteger threadNum = new AtomicInteger(1);
 
@@ -240,8 +234,8 @@ public class Raft {
         }
         log.info("Become Leader in T{}", currentTerm);
         role = Role.LEADER;
-
-        // TODO rf当选leader，初始化leader节点中维护的peers日志视图
+        leaderId = me;
+        // rf当选leader，初始化leader节点中维护的peers日志视图
         for (String peer : peers) {
             nextLogIndex.put(peer, logs.size());
             matchLogIndex.put(peer, 0);
@@ -253,7 +247,7 @@ public class Raft {
      *
      * @return true-改变，false-没改变
      */
-    public boolean contextLostLocked(Role role, long term) {
+    public boolean contextLostLocked(Role role, int term) {
         return !(role == this.role && term == currentTerm);
     }
 
@@ -289,7 +283,12 @@ public class Raft {
     }
 
     public void persistLocked() {
-        return;
+        try {
+            byte[] data = Persister.serialize(raftState);
+            persister.save(data, null);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
     }
 
 
@@ -376,6 +375,7 @@ public class Raft {
             // 本地接受心跳rpc，认可对方是leader，重置自己的选举时钟，一段时间内不发起选举
             // 不管日志匹配是否成功，避免leader和follower匹配日志时间过长
             resetElectionTimerLocked();
+            leaderId = args.getLeaderId();
 
             // 日志冲突(日志不匹配)：日志的索引 或 任期 不同
             // 1、leader前一条日志索引 超出 本地节点的日志范围，说明leader倒数第二条日志就比follower的多
@@ -422,8 +422,57 @@ public class Raft {
     /**
      * 回调函数
      * leader处理客户端请求，把客户端命令转成日志，应用到状态机
+     * 客户端的请求
      */
-    public ClientResponse clientRequest(ClientRequest obj) {
+    public ClientResponse clientRequest(ClientRequest req) {
+        // TODO: reader index机制，客户端能从follower读取数据且保证一致性，减少leader负担
+        if (role != Role.LEADER) {
+            if (StringUtils.isNotEmpty(leaderId)) {
+                log.info("当前节点{}-{} 不是leader, 客户端请求重定向至leader-{}", role.getDesc(), me, leaderId);
+                return ClientResponse.redirect(leaderId);
+            } else {
+                log.warn("当前任期 T{} raft集群没有leader", currentTerm);
+                return ClientResponse.failure("当前任期raft集群没有leader");
+            }
+        }
+        // leader处理客户端请求
+        // get
+        if (req.getCmd() == ClientRequest.GET) {
+            log.info("我是{}，我来处理客户端请求", role);
+            lock.lock();
+            try {
+                String value = skipList.get(req.getKey());
+                if (value != null) {
+                    return ClientResponse.success(value);
+                } else {
+                    return ClientResponse.success();
+                }
+            } finally {
+                lock.unlock();
+            }
+        }
+        // insert
+        if (req.getCmd() == ClientRequest.INSERT) {
+            log.info("我是{}，我来处理客户端请求", role);
+            lock.lock();
+            try {
+                skipList.insert(req.getKey(), req.getValue());
+                return ClientResponse.success();
+            } finally {
+                lock.unlock();
+            }
+        }
+        // delete
+        if (req.getCmd() == ClientRequest.DELETE) {
+            log.info("我是{}，我来处理客户端请求", role);
+            lock.lock();
+            try {
+                skipList.remove(req.getKey());
+                return ClientResponse.success();
+            } finally {
+                lock.unlock();
+            }
+        }
         return null;
     }
 
@@ -454,7 +503,7 @@ public class Raft {
         }
     }
 
-    private void startElection(long term) {
+    private void startElection(int term) {
         // 投票数
         AtomicInteger votes = new AtomicInteger(0);
         for (String peer : peers) {
@@ -621,18 +670,18 @@ public class Raft {
                         }, electionExecutor);
             }
         }
-    }
 
-    // 心跳、日志复制rpc请求，执行对应回调
-    private AppendEntriesReply replicateToPeer(String peer, AppendEntriesArgs args) {
-        AppendEntriesReply reply;
-        try {
-            Request request = new Request(Request.APPEND_ENTRIES, args, peer);
-            reply = rpcClient.send(request);
-            log.info("{}-{}-T{} 发送心跳rpc 给 {}-T{}", args.getLeaderId(), role, args.getTerm(), peer, reply.getTerm());
-            return reply;
-        } catch (Exception e) {
-            return null;
+        // 心跳、日志复制rpc请求，执行对应回调
+        private AppendEntriesReply replicateToPeer(String peer, AppendEntriesArgs args) {
+            AppendEntriesReply reply;
+            try {
+                Request request = new Request(Request.APPEND_ENTRIES, args, peer);
+                reply = rpcClient.send(request);
+                log.info("{}-{}-T{} 发送心跳rpc 给 {}-T{}", args.getLeaderId(), role, args.getTerm(), peer, reply.getTerm());
+                return reply;
+            } catch (Exception e) {
+                return null;
+            }
         }
     }
 

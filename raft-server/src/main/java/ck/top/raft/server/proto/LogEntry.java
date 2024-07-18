@@ -1,13 +1,11 @@
 package ck.top.raft.server.proto;
 
 import lombok.Data;
-import lombok.AllArgsConstructor;
 import lombok.NoArgsConstructor;
 
 import java.io.Serializable;
 
 @Data
-@AllArgsConstructor
 @NoArgsConstructor
 public class LogEntry implements Serializable {
 

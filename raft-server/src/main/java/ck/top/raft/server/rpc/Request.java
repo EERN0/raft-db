@@ -1,9 +1,11 @@
 package ck.top.raft.server.rpc;
 
+import lombok.Builder;
 import lombok.Data;
 
 import java.io.Serializable;
 
+@Builder
 @Data
 public class Request implements Serializable {
 
