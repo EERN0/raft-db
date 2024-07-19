@@ -1,5 +1,6 @@
 package ck.top.raft.server.proto;
 
+import lombok.Builder;
 import lombok.Data;
 
 import java.io.Serializable;
@@ -8,6 +9,7 @@ import java.io.Serializable;
  * 候选者candidate发起要票rpc
  * 要票rpc的请求参数
  */
+@Builder
 @Data
 public class RequestVoteArgs implements Serializable {
 

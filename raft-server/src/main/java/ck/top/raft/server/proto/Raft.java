@@ -216,7 +216,7 @@ public class Raft {
         log.info("{}->Follower, for T{}->T{}", role.getDesc(), currentTerm, term);
         role = Role.FOLLOWER;
 
-        // TODO 节点 currentTerm || votedFor || log改变，都需要持久化
+        // 节点 currentTerm || votedFor || log改变，都需要持久化
         persistLocked();
 
         // 其它节点任期 大于 当前节点
@@ -238,7 +238,7 @@ public class Raft {
         currentTerm++;
         role = Role.CANDIDATE;
         votedFor = me;
-        // TODO 节点 currentTerm || votedFor || log改变，都需要持久化
+        // 节点 currentTerm || votedFor || log改变，都需要持久化
         persistLocked();
     }
 
@@ -481,7 +481,7 @@ public class Raft {
             log.info("我是{}，我来处理客户端insert请求", role);
             lock.lock();
             try {
-                LogEntry newLog = LogEntry.builder().term(currentTerm).index(commitLogIndex).isValid(true)
+                LogEntry newLog = LogEntry.builder().term(currentTerm).index(logs.size() - 1).isValid(true)
                         .command(Command.builder().key(req.getKey()).value(req.getValue()).build())
                         .build();
                 logs.add(newLog);
@@ -526,15 +526,19 @@ public class Raft {
     private void startElection(int term) {
         // 投票数
         AtomicInteger votes = new AtomicInteger(0);
+        // 当前节点的日志长度
+        int len = logs.size();
+
         for (String peer : peers) {
             // 是自己，给自己投一票
             if (Objects.equals(peer, me)) {
                 votes.incrementAndGet();
                 continue;
             }
-            RequestVoteArgs args = new RequestVoteArgs();
-            args.setTerm(currentTerm);
-            args.setCandidateId(me);
+            // candidate的要票rpc请求参数，得加上日志部分
+            RequestVoteArgs args = RequestVoteArgs.builder()
+                    .term(currentTerm).candidateId(me).lastLogIndex(len - 1).lastLogTerm(logs.get(len - 1).getTerm())
+                    .build();
 
             // 上下文检查（检查当前节点还是不是发送rpc要票请求之前的角色，因为rpc请求响应的时间长，避免要票节点角色在rpc期间发生变化）
             // 在发送rpc请求和响应的这个时间段内，检查节点角色和任期是否变化（candidate才会发要票rpc请求）
@@ -561,8 +565,7 @@ public class Raft {
                             if (reply.isVoteGranted()) {
                                 // 超过半数选票，成为leader
                                 if (votes.incrementAndGet() > peers.size() / 2) {
-                                    // TODO 第一次变为leader执行，只执行一次
-                                    // 成为leader，异步执行定时任务，发送【心跳和日志同步】rpc
+                                    // 成为leader，异步执行定时任务，发送【心跳和日志同步】rpc (第一次变为leader执行，只执行一次)
                                     log.info("{}-T{}成为leader, 获得票数{}", args.getCandidateId(), currentTerm, votes.get());
                                     becomeLeaderLocked();
                                     if (isReplicationScheduled.compareAndSet(false, true)) {
