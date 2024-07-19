@@ -423,6 +423,8 @@ public class Raft {
             // 状态持久化
             persistLocked();
 
+            log.info("本地节点{}-{}-T{}日志内容: {}", role, me, currentTerm, logs.toString());
+
             reply.setTerm(args.getTerm());
             reply.setSucceeded(true);
 
@@ -479,6 +481,11 @@ public class Raft {
             log.info("我是{}，我来处理客户端insert请求", role);
             lock.lock();
             try {
+                LogEntry newLog = LogEntry.builder().term(currentTerm).index(commitLogIndex).isValid(true)
+                        .command(Command.builder().key(req.getKey()).value(req.getValue()).build())
+                        .build();
+                logs.add(newLog);
+                // TODO 日志应用
                 skipList.insert(req.getKey(), req.getValue());
                 return ClientResponse.success();
             } finally {
@@ -486,16 +493,6 @@ public class Raft {
             }
         }
 
-        if (req.getCmd() == ClientRequest.DELETE) {
-            log.info("我是{}，我来处理客户端delete请求", role);
-            lock.lock();
-            try {
-                skipList.remove(req.getKey());
-                return ClientResponse.success();
-            } finally {
-                lock.unlock();
-            }
-        }
         return null;
     }
 

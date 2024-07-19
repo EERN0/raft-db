@@ -1,12 +1,12 @@
 package ck.top.raft.server.proto;
 
-import lombok.AllArgsConstructor;
+import lombok.Builder;
 import lombok.Data;
 
 import java.io.Serializable;
 
 @Data
-@AllArgsConstructor
+@Builder
 public class Command implements Serializable {
     String key;
     String value;
