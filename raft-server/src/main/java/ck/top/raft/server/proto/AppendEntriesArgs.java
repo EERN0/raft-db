@@ -1,5 +1,6 @@
 package ck.top.raft.server.proto;
 
+import ck.top.raft.server.log.LogEntry;
 import lombok.Data;
 
 import java.io.Serializable;

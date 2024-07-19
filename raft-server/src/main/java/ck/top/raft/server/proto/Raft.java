@@ -3,6 +3,7 @@ package ck.top.raft.server.proto;
 import ck.top.raft.common.constant.Constant;
 import ck.top.raft.common.enums.Role;
 import ck.top.raft.server.kv.SkipList;
+import ck.top.raft.server.log.LogEntry;
 import ck.top.raft.server.rpc.Request;
 import ck.top.raft.server.rpc.RpcClient;
 import ck.top.raft.server.rpc.RpcServer;
@@ -86,6 +87,8 @@ public class Raft {
         // 先加一条无效的空日志，类似虚拟头节点，减少边界判断
         logs = new ArrayList<>();
         logs.add(new LogEntry(Constant.INVALID_LOG_INDEX, Constant.INVALID_LOG_TERM));
+
+        raftState = RaftState.builder().votedFor(votedFor).currentTerm(currentTerm).logs(logs).build();
     }
 
     public void start() {
@@ -108,6 +111,19 @@ public class Raft {
         rpcClient = new RpcClient();
         peers = new ArrayList<>();
         Collections.addAll(peers, "localhost:9991", "localhost:9992", "localhost:9993", "localhost:9994", "localhost:9995");
+
+        // raft节点状态恢复
+        this.persister = new Persister(port);
+        byte[] data = persister.readRaftState();
+        if (data != null) {
+            try {
+                this.raftState = (RaftState) Persister.deserialize(data);
+            } catch (IOException | ClassNotFoundException e) {
+                e.printStackTrace();
+            }
+        } else {
+            this.raftState = new RaftState(1, null, new ArrayList<>());
+        }
 
         // 初始化leader日志视图，leader掌握所有peer的日志视图
         nextLogIndex = new HashMap<>(peers.size());
@@ -201,6 +217,7 @@ public class Raft {
         role = Role.FOLLOWER;
 
         // TODO 节点 currentTerm || votedFor || log改变，都需要持久化
+        persistLocked();
 
         // 其它节点任期 大于 当前节点
         if (term > currentTerm) {
@@ -222,6 +239,7 @@ public class Raft {
         role = Role.CANDIDATE;
         votedFor = me;
         // TODO 节点 currentTerm || votedFor || log改变，都需要持久化
+        persistLocked();
     }
 
     /**
@@ -282,7 +300,13 @@ public class Raft {
         return temp.get(majorityIdx);
     }
 
+    /**
+     * 状态持久化
+     */
     public void persistLocked() {
+        raftState.setCurrentTerm(currentTerm);
+        raftState.setVotedFor(votedFor);
+        raftState.setLogs(logs);
         try {
             byte[] data = Persister.serialize(raftState);
             persister.save(data, null);
@@ -336,7 +360,8 @@ public class Raft {
             reply.setVoteGranted(true);
             votedFor = args.getCandidateId();
 
-            // TODO 节点 currentTerm || votedFor || log改变，都需要持久化 persistLocked()
+            // 节点 currentTerm || votedFor || log改变，都需要持久化 persistLocked()
+            persistLocked();
 
             // 重置选举超时时间
             resetElectionTimerLocked();
@@ -395,7 +420,7 @@ public class Raft {
             // 清空本地日志[idx+1, size-1]的日志，复制leader传入的日志条目
             logs.subList(args.getPreLogIndex() + 1, logs.size()).clear();
             logs.addAll(args.getPreLogIndex() + 1, args.getEntries());
-            // TODO 日志持久化
+            // 状态持久化
             persistLocked();
 
             reply.setTerm(args.getTerm());
@@ -436,9 +461,8 @@ public class Raft {
             }
         }
         // leader处理客户端请求
-        // get
         if (req.getCmd() == ClientRequest.GET) {
-            log.info("我是{}，我来处理客户端请求", role);
+            log.info("我是{}，我来处理客户端get请求", role);
             lock.lock();
             try {
                 String value = skipList.get(req.getKey());
@@ -451,9 +475,8 @@ public class Raft {
                 lock.unlock();
             }
         }
-        // insert
         if (req.getCmd() == ClientRequest.INSERT) {
-            log.info("我是{}，我来处理客户端请求", role);
+            log.info("我是{}，我来处理客户端insert请求", role);
             lock.lock();
             try {
                 skipList.insert(req.getKey(), req.getValue());
@@ -462,9 +485,9 @@ public class Raft {
                 lock.unlock();
             }
         }
-        // delete
+
         if (req.getCmd() == ClientRequest.DELETE) {
-            log.info("我是{}，我来处理客户端请求", role);
+            log.info("我是{}，我来处理客户端delete请求", role);
             lock.lock();
             try {
                 skipList.remove(req.getKey());

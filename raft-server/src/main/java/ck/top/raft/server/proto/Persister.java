@@ -3,6 +3,17 @@ package ck.top.raft.server.proto;
 import java.io.*;
 
 public class Persister {
+
+    private String port;
+
+    public Persister(String port) {
+        this.port = port;
+    }
+
+    private String getFilePath() {
+        return "state/" + port + "/raft_state.dat";
+    }
+
     public static byte[] serialize(Object obj) throws IOException {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         ObjectOutputStream oos = new ObjectOutputStream(baos);
@@ -20,7 +31,10 @@ public class Persister {
     }
 
     public void save(byte[] raftState, byte[] snapshot) {
-        try (FileOutputStream fos = new FileOutputStream("raft_state.dat")) {
+        String filePath = getFilePath();
+        File file = new File(filePath);
+        file.getParentFile().mkdirs();  // 创建父目录
+        try (FileOutputStream fos = new FileOutputStream(file)) {
             fos.write(raftState);
         } catch (IOException e) {
             e.printStackTrace();
@@ -28,7 +42,12 @@ public class Persister {
     }
 
     public byte[] readRaftState() {
-        try (FileInputStream fis = new FileInputStream("raft_state.dat")) {
+        String filePath = getFilePath();
+        File file = new File(filePath);
+        if (!file.exists()) {
+            return null;
+        }
+        try (FileInputStream fis = new FileInputStream(file)) {
             byte[] data = new byte[fis.available()];
             fis.read(data);
             return data;
