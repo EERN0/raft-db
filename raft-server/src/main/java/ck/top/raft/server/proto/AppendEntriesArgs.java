@@ -1,6 +1,7 @@
 package ck.top.raft.server.proto;
 
 import ck.top.raft.server.log.LogEntry;
+import lombok.Builder;
 import lombok.Data;
 
 import java.io.Serializable;
@@ -10,6 +11,7 @@ import java.util.List;
 /**
  * leader才会发送心跳、日志复制请求
  */
+@Builder
 @Data
 public class AppendEntriesArgs implements Serializable {
 

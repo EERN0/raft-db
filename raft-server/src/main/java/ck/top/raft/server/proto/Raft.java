@@ -48,9 +48,9 @@ public class Raft {
     private Map<String, Integer> matchLogIndex;    // matchLogIndex.get(peer): peer节点已经成功复制的日志条目最高索引
 
     // 全局已提交日志的索引，表示所有在此索引或更低索引的日志条目都已经被大多数节点成功复制，并且可以被安全地应用到状态机中
-    int commitLogIndex;
+    private int commitLogIndex;
     // 已经应用的日志索引
-    int lastAppliedIndex;
+    private int lastAppliedIndex;
 
     // 日志应用的条件变量
     private final Condition applyCond = lock.newCondition();
@@ -58,9 +58,9 @@ public class Raft {
     private BlockingQueue<ApplyMsg> applyCh = new LinkedBlockingQueue<>();
 
     // 选举开始时间
-    public long electionStart;
+    private long electionStart;
     // 选举随机超时时间 2500~4000ms
-    public long electionTimeout;
+    private long electionTimeout;
 
     // rpc
     private RpcServer rpcServer;
@@ -75,7 +75,7 @@ public class Raft {
     private final AtomicBoolean isReplicationScheduled = new AtomicBoolean(false);
 
     // KV存储引擎
-    SkipList<String, String> skipList = SkipList.getInstance();
+    private SkipList<String, String> skipList = SkipList.getInstance();
 
     // 心跳、日志复制定时任务
     private final ReplicationTicker replicationTicker;
@@ -99,8 +99,10 @@ public class Raft {
 
         log.info("Raft node started successfully. The current term is {}", currentTerm);
 
+        // 执行选举
         CompletableFuture.runAsync(this::electionTicker);
 
+        // 执行日志应用
         CompletableFuture.runAsync(this::applicationTicker);
     }
 
@@ -163,7 +165,7 @@ public class Raft {
      */
     private void resetElectionTimerLocked() {
         electionStart = System.currentTimeMillis();
-        log.info("重置上一次选举时间: {}", electionStart);
+        //log.info("重置上一次选举时间: {}", electionStart);
         long range = Constant.ELECTION_TIMEOUT_MAX - Constant.ELECTION_TIMEOUT_MIN;
         // 选举超时时间：2500~4000ms
         electionTimeout = Constant.ELECTION_TIMEOUT_MIN + ThreadLocalRandom.current().nextLong() % range;
@@ -175,12 +177,12 @@ public class Raft {
      * @return true-超时，false-没超时
      */
     private boolean isElectionTimeoutLocked() {
-        long l = System.currentTimeMillis() - (electionStart + electionTimeout);
-        if (l > 0) {
-            log.info("选举超时，超时时间:{}", l);
-        } else {
-            log.info("选举未超时");
-        }
+        //long l = System.currentTimeMillis() - (electionStart + electionTimeout);
+        //if (l > 0) {
+        //    log.info("选举超时，超时时间:{}", l);
+        //} else {
+        //    log.info("选举未超时");
+        //}
         return System.currentTimeMillis() - electionStart > electionTimeout;
     }
 
@@ -430,14 +432,16 @@ public class Raft {
 
             // 本地节点根据leader最新的commit来更新自己的commit信息
             if (args.getLeaderCommitIndex() > commitLogIndex) {
+                log.info("leaderCommitIndex:{} > 本地节点commitIndex:{}, 本地节点有日志没应用到状态机，唤醒日志应用", args.getLeaderCommitIndex(), commitLogIndex);
+
                 commitLogIndex = args.getLeaderCommitIndex();
                 // 确保commit日志索引不会超过
                 if (commitLogIndex >= logs.size()) {
                     commitLogIndex = logs.size() - 1;
                 }
+                // 唤醒 日志应用
+                applyCond.signal();
             }
-            // 唤醒 日志应用 开始干活
-            applyCond.signal();
 
             return reply;
         } finally {
@@ -482,11 +486,12 @@ public class Raft {
             lock.lock();
             try {
                 LogEntry newLog = LogEntry.builder().term(currentTerm).index(logs.size() - 1).isValid(true)
-                        .command(Command.builder().key(req.getKey()).value(req.getValue()).build())
+                        .command(Command.builder().cmd(Command.INSERT).key(req.getKey()).value(req.getValue()).build())
                         .build();
                 logs.add(newLog);
-                // TODO 日志应用
-                skipList.insert(req.getKey(), req.getValue());
+                // TODO: 日志应用
+
+                //skipList.insert(req.getKey(), req.getValue());
                 return ClientResponse.success();
             } finally {
                 lock.unlock();
@@ -617,13 +622,12 @@ public class Raft {
                 int prevIdx = nextLogIndex.get(peer) - 1;
                 int prevTerm = logs.get(prevIdx).getTerm();
 
-                AppendEntriesArgs args = new AppendEntriesArgs();
-                args.setLeaderId(me);
-                args.setTerm(term);
-                args.setPreLogIndex(prevIdx);
-                args.setPreLogTerm(prevTerm);
-                args.setEntries(new ArrayList<>(logs.subList(prevIdx + 1, logs.size())));
-                args.setLeaderCommitIndex(commitLogIndex);
+                // 追加peer需要的日志，不是全量日志
+                AppendEntriesArgs args = AppendEntriesArgs.builder()
+                        .leaderId(me).term(term).preLogIndex(prevIdx).preLogTerm(prevTerm)
+                        .entries(new ArrayList<>(logs.subList(prevIdx + 1, logs.size())))
+                        .leaderCommitIndex(commitLogIndex)
+                        .build();
 
                 // 上下文检查，异步请求和响应之间，检查当前节点角色、任期是否改变
                 if (contextLostLocked(Role.LEADER, term)) {
@@ -644,7 +648,7 @@ public class Raft {
                                     becomeFollowerLocked(reply.getTerm());
                                     return;
                                 }
-                                log.info("{}-{}-T{} 收到来自 {}-T{} 的心跳响应", args.getLeaderId(), role, args.getTerm(), peer, reply.getTerm());
+                                //log.info("{}-{}-T{} 收到来自 {}-T{} 的心跳响应", args.getLeaderId(), role, args.getTerm(), peer, reply.getTerm());
 
                                 // 处理leader和follower日志冲突
                                 if (!reply.isSucceeded()) {
@@ -678,7 +682,7 @@ public class Raft {
                                 matchLogIndex.put(peer, args.getPreLogIndex() + args.getEntries().size());  // follower已经复制日志最后的索引
                                 nextLogIndex.put(peer, matchLogIndex.get(peer) + 1);                        // leader下一次发送日志同步请求的索引
 
-                                // leader确定日志条目已经被大多数节点成功复制时，标记该日志条目为已提交，更新commitIndex
+                                // 日志被大多数节点成功复制后，leader标记该日志为已提交，更新commitIndex
                                 int majorityMatchedIdx = getMajorityMatchedLogIndexLocked();
                                 if (majorityMatchedIdx > commitLogIndex && logs.get(majorityMatchedIdx).getTerm() == currentTerm) {
                                     log.info("Leader update the commit index {}->{}", commitLogIndex, majorityMatchedIdx);
@@ -708,17 +712,67 @@ public class Raft {
         }
     }
 
+
+    /**
+     * 日志应用
+     * 阻塞在条件变量applyCond，唤醒后将已提交的日志项写入各peer的状态机(kv存储引擎)
+     */
     private void applicationTicker() {
         while (true) {
             lock.lock();
             try {
+                applyCond.await();
                 List<LogEntry> entries = new ArrayList<>();
                 for (int i = lastAppliedIndex + 1; i <= commitLogIndex; i++) {
                     entries.add(logs.get(i));
                 }
+                log.info("已经应用的日志索引: {}，需要应用的日志项: {}", lastAppliedIndex, entries.toString());
+                for (int i = 0; i < entries.size(); i++) {
+                    ApplyMsg applyMsg = ApplyMsg.builder()
+                            .commandValid(entries.get(i).isValid())
+                            .command(entries.get(i).getCommand())
+                            .commandIndex(lastAppliedIndex + 1 + i)
+                            .build();
+
+                    boolean offer = applyCh.offer(applyMsg);
+                    if (offer) {
+                        log.info("{}已放入阻塞队列", applyCh.toString());
+                    }
+                }
+                lastAppliedIndex += entries.size();
+
+                // 日志应用
+                while (!applyCh.isEmpty()) {
+                    ApplyMsg msg = applyCh.take();
+                    if (msg.isCommandValid()) {
+                        LogEntry entry = LogEntry.builder().command(msg.getCommand()).build();
+                        applyLogEntry(entry);
+                        log.info("日志应用执行...，{}已经写入节点{}的状态机", entry, me);
+                    }
+                }
+
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
             } finally {
                 lock.unlock();
             }
+        }
+    }
+
+    /**
+     * 增删 kv存储引擎
+     *
+     * @param entry 日志项
+     */
+    private void applyLogEntry(LogEntry entry) {
+        switch (entry.getCommand().getCmd()) {
+            case Command.INSERT:
+                skipList.insert(entry.getCommand().getKey(), entry.getCommand().getValue());
+                break;
+            case Command.DELETE:
+                skipList.remove(entry.getCommand().getKey());
+                break;
+            // "get" 操作不修改状态
         }
     }
 }
