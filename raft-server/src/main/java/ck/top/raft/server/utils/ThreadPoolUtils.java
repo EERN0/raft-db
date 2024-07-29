@@ -31,8 +31,6 @@ public class ThreadPoolUtils {
 
     /**
      * 执行任务
-     *
-     * @param runnable 任务
      */
     public static void execute(Runnable runnable) {
         CompletableFuture<Void> future = CompletableFuture.runAsync(runnable, executor);
@@ -45,6 +43,15 @@ public class ThreadPoolUtils {
         });
         // 任务结果列表
         completableFutures.add(future);
+    }
+
+    public static ThreadPoolExecutor commonThreadPoolExecutor(String name, int corePoolSize, int maxPoolSize, long keepAlive) {
+        if (StringUtils.isEmpty(name)) {
+            name = "通用任务执行线程池_" + System.currentTimeMillis();
+        }
+        CustomThreadFactory customThreadFactory = new CustomThreadFactory(name);
+        // 任务拒绝策略：由提交任务的线程执行
+        return new ThreadPoolExecutor(corePoolSize, maxPoolSize, keepAlive, TimeUnit.SECONDS, new ArrayBlockingQueue<>(1000), customThreadFactory, new ThreadPoolExecutor.CallerRunsPolicy());
     }
 
     public static ThreadPoolExecutor newThreadPoolExecutor(String name) {
@@ -132,9 +139,7 @@ public class ThreadPoolUtils {
             return rejectCount;
         }
 
-        /**
-         * 这个方法，如果不抛异常，则执行此任务的线程会一直阻塞
-         */
+        // 这个方法，如果不抛异常，则执行此任务的线程会一直阻塞
         public void rejectedExecution(Runnable r, ThreadPoolExecutor e) {
             log.error("Task {} rejected from {} 累计：{}", r.toString(), e.toString(), rejectCount.incrementAndGet());
         }

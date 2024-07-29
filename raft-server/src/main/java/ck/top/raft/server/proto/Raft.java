@@ -7,6 +7,7 @@ import ck.top.raft.server.log.LogEntry;
 import ck.top.raft.server.rpc.Request;
 import ck.top.raft.server.rpc.RpcClient;
 import ck.top.raft.server.rpc.RpcServer;
+import ck.top.raft.server.utils.ThreadPoolUtils;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 
@@ -68,7 +69,7 @@ public class Raft {
 
     // 线程池，执行领导选举逻辑
     private ThreadPoolExecutor electionExecutor;
-    private ThreadPoolExecutor heartExecutor;
+    private ThreadPoolExecutor replicationExecutor;
     // 定时任务
     private ScheduledExecutorService scheduler;
 
@@ -121,7 +122,7 @@ public class Raft {
             try {
                 this.raftState = (RaftState) Persister.deserialize(data);
             } catch (IOException | ClassNotFoundException e) {
-                e.printStackTrace();
+                throw new RuntimeException(e);
             }
         } else {
             this.raftState = new RaftState(1, null, new ArrayList<>());
@@ -140,10 +141,9 @@ public class Raft {
         // 线程池参数
         int cpu = Runtime.getRuntime().availableProcessors();
         int maxPoolSize = cpu * 2;
-        int queueSize = 1024;
-        long keepAlive = 2000 * 60;
+        long keepAlive = 2 * 60;
 
-        ThreadFactory namedThreadFactory2 = new ThreadFactory() {
+        ThreadFactory namedThreadFactory = new ThreadFactory() {
             private final AtomicInteger threadNum = new AtomicInteger(1);
 
             @Override
@@ -153,11 +153,9 @@ public class Raft {
                 return t;
             }
         };
-        electionExecutor = new ThreadPoolExecutor(cpu, maxPoolSize, keepAlive, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>(queueSize));
-        //electionExecutor = new ThreadPoolExecutor(4, 4, keepAlive, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<Runnable>(queueSize));
-        //electionExecutor = new NamedThreadPoolExecutor(cpu, maxPoolSize, keepAlive, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<Runnable>(queueSize), namedThreadFactory, "electionThreadPool");
-        //heartExecutor = new NamedThreadPoolExecutor(cpu, maxPoolSize, keepAlive, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<Runnable>(queueSize), namedThreadFactory2, "electionThreadPool");
-        scheduler = new ScheduledThreadPoolExecutor(1, namedThreadFactory2);
+        electionExecutor = ThreadPoolUtils.commonThreadPoolExecutor("选举", cpu, cpu, keepAlive);
+        replicationExecutor = ThreadPoolUtils.commonThreadPoolExecutor("日志复制", cpu, maxPoolSize, keepAlive);
+        scheduler = new ScheduledThreadPoolExecutor(1, namedThreadFactory);
     }
 
     /**
@@ -636,7 +634,7 @@ public class Raft {
                 }
 
                 // 对每个peer发送心跳、日志复制rpc
-                CompletableFuture.supplyAsync(() -> replicateToPeer(peer, args), electionExecutor)
+                CompletableFuture.supplyAsync(() -> replicateToPeer(peer, args), replicationExecutor)
                         .thenAcceptAsync(reply -> {
                             lock.lock();
                             try {
@@ -694,7 +692,7 @@ public class Raft {
                             } finally {
                                 lock.unlock();
                             }
-                        }, electionExecutor);
+                        }, replicationExecutor);
             }
         }
 
