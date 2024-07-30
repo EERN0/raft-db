@@ -8,8 +8,9 @@ import ck.top.raft.server.rpc.Request;
 import ck.top.raft.server.rpc.RpcClient;
 import ck.top.raft.server.rpc.RpcServer;
 import ck.top.raft.server.utils.ThreadPoolUtils;
-import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.*;
@@ -19,7 +20,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
-@Slf4j
 public class Raft {
     // 当前节点地址，格式{ip:port}
     private String me;
@@ -72,14 +72,15 @@ public class Raft {
     private ThreadPoolExecutor replicationExecutor;
     // 定时任务
     private ScheduledExecutorService scheduler;
+    private final ReplicationTicker replicationTicker;
 
+    // 心跳、日志复制定时任务
     private final AtomicBoolean isReplicationScheduled = new AtomicBoolean(false);
 
     // KV存储引擎
     private SkipList<String, String> skipList = SkipList.getInstance();
 
-    // 心跳、日志复制定时任务
-    private final ReplicationTicker replicationTicker;
+    private static final Logger log = LoggerFactory.getLogger(Raft.class);
 
     public Raft() {
         electionStart = System.currentTimeMillis();
@@ -121,8 +122,12 @@ public class Raft {
         if (data != null) {
             try {
                 this.raftState = (RaftState) Persister.deserialize(data);
+                this.currentTerm = raftState.getCurrentTerm();
+                this.votedFor = raftState.getVotedFor();
+                this.logs = raftState.getLogs();
+                log.info("raft节点状态恢复: {}", raftState.toString());
             } catch (IOException | ClassNotFoundException e) {
-                throw new RuntimeException(e);
+                log.error("反序列化，读取raft节点状态失败, {}", e.toString());
             }
         } else {
             this.raftState = new RaftState(1, null, new ArrayList<>());
@@ -175,12 +180,6 @@ public class Raft {
      * @return true-超时，false-没超时
      */
     private boolean isElectionTimeoutLocked() {
-        //long l = System.currentTimeMillis() - (electionStart + electionTimeout);
-        //if (l > 0) {
-        //    log.info("选举超时，超时时间:{}", l);
-        //} else {
-        //    log.info("选举未超时");
-        //}
         return System.currentTimeMillis() - electionStart > electionTimeout;
     }
 
@@ -311,7 +310,7 @@ public class Raft {
             byte[] data = Persister.serialize(raftState);
             persister.save(data, null);
         } catch (IOException e) {
-            e.printStackTrace();
+            log.error("序列化，保存raft节点状态失败, {}", e.toString());
         }
     }
 
@@ -440,7 +439,6 @@ public class Raft {
                 // 唤醒 日志应用
                 applyCond.signal();
             }
-
             return reply;
         } finally {
             lock.unlock();
@@ -487,15 +485,14 @@ public class Raft {
                         .command(Command.builder().cmd(Command.INSERT).key(req.getKey()).value(req.getValue()).build())
                         .build();
                 logs.add(newLog);
-                // TODO: 日志应用
+                // 日志改变，持久化raft节点状态
+                persistLocked();
 
-                //skipList.insert(req.getKey(), req.getValue());
                 return ClientResponse.success();
             } finally {
                 lock.unlock();
             }
         }
-
         return null;
     }
 
@@ -748,7 +745,6 @@ public class Raft {
                         log.info("日志应用执行...，{}已经写入节点{}的状态机", entry, me);
                     }
                 }
-
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             } finally {

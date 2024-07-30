@@ -14,6 +14,9 @@ public class RaftState implements Serializable {
     private String votedFor;
     private List<LogEntry> logs;
 
+    public RaftState() {
+    }
+
     public RaftState(int currentTerm, String votedFor, List<LogEntry> logs) {
         this.currentTerm = currentTerm;
         this.votedFor = votedFor;
