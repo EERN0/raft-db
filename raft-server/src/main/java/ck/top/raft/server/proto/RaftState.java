@@ -1,6 +1,7 @@
 package ck.top.raft.server.proto;
 
 import ck.top.raft.server.log.LogEntry;
+import ck.top.raft.server.log.RaftLog;
 import lombok.Builder;
 import lombok.Data;
 
@@ -12,12 +13,12 @@ import java.util.List;
 public class RaftState implements Serializable {
     private int currentTerm;
     private String votedFor;
-    private List<LogEntry> logs;
+    private RaftLog logs;
 
     public RaftState() {
     }
 
-    public RaftState(int currentTerm, String votedFor, List<LogEntry> logs) {
+    public RaftState(int currentTerm, String votedFor, RaftLog logs) {
         this.currentTerm = currentTerm;
         this.votedFor = votedFor;
         this.logs = logs;

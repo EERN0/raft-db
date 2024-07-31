@@ -4,6 +4,7 @@ import ck.top.raft.common.constant.Constant;
 import ck.top.raft.common.enums.Role;
 import ck.top.raft.server.kv.SkipList;
 import ck.top.raft.server.log.LogEntry;
+import ck.top.raft.server.log.RaftLog;
 import ck.top.raft.server.rpc.Request;
 import ck.top.raft.server.rpc.RpcClient;
 import ck.top.raft.server.rpc.RpcServer;
@@ -42,7 +43,7 @@ public class Raft {
     private Persister persister;
 
     // 每个节点本地的日志。日志索引+日志任期相同 ==> 日志相同（从日志开头到索引位置的日志都相同）
-    private List<LogEntry> logs;
+    private RaftLog logs;
 
     // 仅在leader中使用，每个peer的日志视图
     private Map<String, Integer> nextLogIndex;     // leader下一次给peer发送的日志，起始索引为nextLogIndex.get(peer)
@@ -86,10 +87,10 @@ public class Raft {
         electionStart = System.currentTimeMillis();
         replicationTicker = new ReplicationTicker();
 
-        // 先加一条无效的空日志，类似虚拟头节点，减少边界判断
-        logs = new ArrayList<>();
-        logs.add(new LogEntry(Constant.INVALID_LOG_INDEX, Constant.INVALID_LOG_TERM));
-
+        // 尾部日志第一条为无效的空日志，类似虚拟头节点，减少边界判断
+        logs = RaftLog.builder().snapshot(null).tailLog(new ArrayList<>())
+                .snapLastLogIdx(Constant.INVALID_LOG_INDEX).snapLastLogTerm(Constant.INVALID_LOG_TERM)
+                .build();
         raftState = RaftState.builder().votedFor(votedFor).currentTerm(currentTerm).logs(logs).build();
     }
 
@@ -130,7 +131,10 @@ public class Raft {
                 log.error("反序列化，读取raft节点状态失败, {}", e.toString());
             }
         } else {
-            this.raftState = new RaftState(1, null, new ArrayList<>());
+            RaftLog initLog = RaftLog.builder().snapshot(null).tailLog(new ArrayList<>())
+                    .snapLastLogIdx(Constant.INVALID_LOG_INDEX).snapLastLogTerm(Constant.INVALID_LOG_TERM)
+                    .build();
+            this.raftState = new RaftState(1, null, initLog);
         }
 
         // 初始化leader日志视图，leader掌握所有peer的日志视图
@@ -192,9 +196,9 @@ public class Raft {
      * @return true--candidate的日志比当前节点的日志新
      */
     private boolean isMoreUpToDateLocked(int candidateLogIndex, int candidateLogTerm) {
-        int len = logs.size();
+        int len = logs.getLength();
         // 当前节点最后一条日志
-        int lastLogIndex = len - 1, lastLogTerm = logs.get(len - 1).getTerm();
+        int lastLogIndex = len - 1, lastLogTerm = logs.getTailLog().get(global2tailLogIdx(len - 1)).getTerm();
         // 当前节点最新日志的任期 (lastTerm) 与候选者的任期 (candidateTerm) 不同，日志任期大的新
         if (lastLogTerm != candidateLogTerm) {
             return lastLogTerm > candidateLogTerm;
@@ -254,7 +258,7 @@ public class Raft {
         leaderId = me;
         // rf当选leader，初始化leader节点中维护的peers日志视图
         for (String peer : peers) {
-            nextLogIndex.put(peer, logs.size());
+            nextLogIndex.put(peer, logs.getLength());
             matchLogIndex.put(peer, 0);
         }
     }
@@ -269,16 +273,52 @@ public class Raft {
     }
 
     /**
-     * 节点第一条任期为term的日志索引
+     * 全局日志索引 ==> 尾部日志索引tailLogIdx
+     *
+     * @param globalLogIdx 全局日志索引
+     * @return 尾部日志索引
+     */
+    public int global2tailLogIdx(int globalLogIdx) {
+        if (globalLogIdx < logs.getSnapLastLogIdx() || globalLogIdx >= logs.getLength()) {
+            log.error("日志索引 {} 越界 [{}, {}]", globalLogIdx, logs.getSnapLastLogIdx(), logs.getLength() - 1);
+        }
+        return globalLogIdx - logs.getSnapLastLogIdx();
+    }
+
+    /**
+     * 根据 全局日志索引 查找 尾部日志项
+     *
+     * @param globalLogIdx 全局日志索引
+     * @return 尾部日志项
+     */
+    public LogEntry logEntryAt(int globalLogIdx) {
+        return logs.getTailLog().get(global2tailLogIdx(globalLogIdx));
+    }
+
+    /**
+     * 获取全局日志索引globalLogIdx之后的日志
+     *
+     * @param globalLogIdx 全局日志索引
+     * @return 全局索引之后的日志
+     */
+    public List<LogEntry> getTailLogs(int globalLogIdx) {
+        if (globalLogIdx >= logs.getLength()) {
+            return null;
+        }
+        return new ArrayList<>(logs.getTailLog().subList(global2tailLogIdx(globalLogIdx), logs.getLength()));
+    }
+
+    /**
+     * 节点第一条任期为term的尾部日志索引
      *
      * @param term 任期
-     * @return 第一条任期为term的日志索引 or 无效日志索引
+     * @return 第一条任期为term的尾部日志索引 or 无效日志索引
      */
     public int firstLogIndexFor(int term) {
-        for (int i = 0; i < logs.size(); i++) {
-            if (logs.get(i).getTerm() == term) {
-                return i;
-            } else if (logs.get(i).getTerm() > term) {
+        for (int i = 0; i < logs.getTailLog().size(); i++) {
+            if (logs.getTailLog().get(i).getTerm() == term) {
+                return i + logs.getSnapLastLogIdx();
+            } else if (logs.getTailLog().get(i).getTerm() > term) {
                 break;
             }
         }
@@ -351,7 +391,7 @@ public class Raft {
             // 接收方节点的日志 新于 要票方candidate的日志
             if (isMoreUpToDateLocked(args.getLastLogIndex(), args.getLastLogTerm())) {
                 log.info("当前节点-{}-T{}的最后一条日志索引{} > {}-T{}的日志索引{}，拒绝投票给{}",
-                        me, currentTerm, logs.size() - 1, args.getCandidateId(), args.getTerm(), args.getLastLogIndex(), args.getCandidateId());
+                        me, currentTerm, logs.getLength() - 1, args.getCandidateId(), args.getTerm(), args.getLastLogIndex(), args.getCandidateId());
                 return reply;
             }
 
@@ -403,22 +443,22 @@ public class Raft {
 
             // 日志冲突(日志不匹配)：日志的索引 或 任期 不同
             // 1、leader前一条日志索引 超出 本地节点的日志范围，说明leader倒数第二条日志就比follower的多
-            if (args.getPreLogIndex() >= logs.size()) {
+            if (args.getPreLogIndex() >= logs.getLength()) {
                 // 设置冲突日志为无效任期0，冲突日志索引为logs.size()，下次让leader发送冲突索引及之后的所有日志条目，用来同步follower日志
                 reply.setConflictLogTerm(Constant.INVALID_LOG_TERM);
-                reply.setConflictLogIndex(logs.size());
+                reply.setConflictLogIndex(logs.getLength());
                 return reply;
             }
             // 2、leader前一条日志的任期 不等于 本地节点的日志任期
-            if (args.getPreLogTerm() != logs.get(args.getPreLogIndex()).getTerm()) {
-                reply.setConflictLogTerm(logs.get(args.getPreLogIndex()).getTerm());
+            if (args.getPreLogTerm() != logEntryAt(args.getPreLogIndex()).getTerm()) {
+                reply.setConflictLogTerm(logEntryAt(args.getPreLogIndex()).getTerm());
                 reply.setConflictLogIndex(firstLogIndexFor(reply.getConflictLogTerm()));
                 return reply;
             }
             // leader前一条日志匹配(索引idx)上了本地日志(索引idx)，本地节点同步leader的日志
             // 清空本地日志[idx+1, size-1]的日志，复制leader传入的日志条目
-            logs.subList(args.getPreLogIndex() + 1, logs.size()).clear();
-            logs.addAll(args.getPreLogIndex() + 1, args.getEntries());
+            logs.getTailLog().subList(global2tailLogIdx(args.getPreLogIndex()) + 1, logs.getLength()).clear();
+            logs.getTailLog().addAll(global2tailLogIdx(args.getPreLogIndex()) + 1, args.getEntries());
             // 状态持久化
             persistLocked();
 
@@ -433,8 +473,8 @@ public class Raft {
 
                 commitLogIndex = args.getLeaderCommitIndex();
                 // 确保commit日志索引不会超过
-                if (commitLogIndex >= logs.size()) {
-                    commitLogIndex = logs.size() - 1;
+                if (commitLogIndex >= logs.getLength()) {
+                    commitLogIndex = logs.getLength() - 1;
                 }
                 // 唤醒 日志应用
                 applyCond.signal();
@@ -481,10 +521,11 @@ public class Raft {
             log.info("我是{}，我来处理客户端insert请求", role);
             lock.lock();
             try {
-                LogEntry newLog = LogEntry.builder().term(currentTerm).index(logs.size() - 1).isValid(true)
+                LogEntry newLog = LogEntry.builder()
+                        .term(currentTerm).index(global2tailLogIdx(logs.getLength() - 1)).isValid(true)
                         .command(Command.builder().cmd(Command.INSERT).key(req.getKey()).value(req.getValue()).build())
                         .build();
-                logs.add(newLog);
+                logs.getTailLog().add(newLog);
                 // 日志改变，持久化raft节点状态
                 persistLocked();
 
@@ -527,7 +568,7 @@ public class Raft {
         // 投票数
         AtomicInteger votes = new AtomicInteger(0);
         // 当前节点的日志长度
-        int len = logs.size();
+        int len = logs.getLength();
 
         for (String peer : peers) {
             // 是自己，给自己投一票
@@ -537,7 +578,7 @@ public class Raft {
             }
             // candidate的要票rpc请求参数，得加上日志部分
             RequestVoteArgs args = RequestVoteArgs.builder()
-                    .term(currentTerm).candidateId(me).lastLogIndex(len - 1).lastLogTerm(logs.get(len - 1).getTerm())
+                    .term(currentTerm).candidateId(me).lastLogIndex(global2tailLogIdx(len - 1)).lastLogTerm(logEntryAt(len - 1).getTerm())
                     .build();
 
             // 上下文检查（检查当前节点还是不是发送rpc要票请求之前的角色，因为rpc请求响应的时间长，避免要票节点角色在rpc期间发生变化）
@@ -609,18 +650,19 @@ public class Raft {
         private void startReplication(int term) {
             for (String peer : peers) {
                 if (Objects.equals(peer, me)) {
-                    matchLogIndex.put(peer, logs.size() - 1);
-                    nextLogIndex.put(peer, logs.size());
+                    matchLogIndex.put(peer, logs.getLength() - 1);
+                    nextLogIndex.put(peer, logs.getLength());
                     continue;
                 }
 
                 int prevIdx = nextLogIndex.get(peer) - 1;
-                int prevTerm = logs.get(prevIdx).getTerm();
+                int prevTerm = logEntryAt(prevIdx).getTerm();
 
                 // 追加peer需要的日志，不是全量日志
                 AppendEntriesArgs args = AppendEntriesArgs.builder()
                         .leaderId(me).term(term).preLogIndex(prevIdx).preLogTerm(prevTerm)
-                        .entries(new ArrayList<>(logs.subList(prevIdx + 1, logs.size())))
+                        //.entries(new ArrayList<>(logs.getTailLog().subList(global2tailLogIdx(prevIdx) + 1, logs.getLength())))
+                        .entries(getTailLogs(prevIdx + 1))  // 获取 prevIdx+1 之后的所有日志
                         .leaderCommitIndex(commitLogIndex)
                         .build();
 
@@ -679,7 +721,7 @@ public class Raft {
 
                                 // 日志被大多数节点成功复制后，leader标记该日志为已提交，更新commitIndex
                                 int majorityMatchedIdx = getMajorityMatchedLogIndexLocked();
-                                if (majorityMatchedIdx > commitLogIndex && logs.get(majorityMatchedIdx).getTerm() == currentTerm) {
+                                if (majorityMatchedIdx > commitLogIndex && logEntryAt(majorityMatchedIdx).getTerm() == currentTerm) {
                                     log.info("Leader update the commit index {}->{}", commitLogIndex, majorityMatchedIdx);
                                     // leader更新commitLogIndex为多数派的匹配点
                                     commitLogIndex = majorityMatchedIdx;
@@ -719,7 +761,7 @@ public class Raft {
                 applyCond.await();
                 List<LogEntry> entries = new ArrayList<>();
                 for (int i = lastAppliedIndex + 1; i <= commitLogIndex; i++) {
-                    entries.add(logs.get(i));
+                    entries.add(logEntryAt(i));
                 }
                 log.info("已经应用的日志索引: {}，需要应用的日志项: {}", lastAppliedIndex, entries.toString());
                 for (int i = 0; i < entries.size(); i++) {
