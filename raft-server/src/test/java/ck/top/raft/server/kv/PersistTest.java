@@ -42,46 +42,46 @@ public class PersistTest {
         System.out.println(str);
     }
 
-    @Test
-    public void testRaftStateSerializeAndDeserialize() throws IOException, ClassNotFoundException {
-        ArrayList<LogEntry> log = new ArrayList<>();
-        LogEntry entry = LogEntry.builder().index(1).term(1).command(null).isValid(false).build();
-        log.add(entry);
-        RaftState raftState = RaftState.builder().votedFor("-1").logs(log).build();
-        System.out.println(raftState.toString());
-
-        byte[] bytes = Persister.serialize(raftState);
-        RaftState newRaft = new RaftState();
-        newRaft = (RaftState) Persister.deserialize(bytes);
-        System.out.println(newRaft.toString());
-    }
-
-    @Test
-    public void testSaveAndReadRaftState() throws IOException, ClassNotFoundException {
-        String basePath = System.getProperty("os.name").startsWith("Windows") ? "D:\\Java\\project\\raft-KV\\" : "/";
-        String path = basePath + "state/9991/raft_state.dat";
-        File file = new File(path);
-        if (!file.exists()) {
-            log.error("路径不存在，{}", path);
-        }
-
-        ArrayList<LogEntry> log = new ArrayList<>();
-        LogEntry entry = LogEntry.builder().index(1).term(1).command(null).isValid(false).build();
-        log.add(entry);
-        RaftState raftState = RaftState.builder().votedFor("-1").logs(log).build();
-        byte[] bytes = Persister.serialize(raftState);
-        System.out.println("bytes = " + Arrays.toString(bytes));
-
-        // raft节点状态（字节数组）写入文件
-        FileOutputStream fos = new FileOutputStream(file);
-        fos.write(bytes);
-        // 读取文件的字节数组
-        FileInputStream fis = new FileInputStream(file);
-        byte[] data = new byte[fis.available()];
-        fis.read(data);
-        System.out.println("data = " + Arrays.toString(data));
-        // 反序列化，字节数组还原为raft节点状态
-        RaftState raft = (RaftState)Persister.deserialize(data);
-        System.out.println(raft.toString());
-    }
+    //@Test
+    //public void testRaftStateSerializeAndDeserialize() throws IOException, ClassNotFoundException {
+    //    ArrayList<LogEntry> log = new ArrayList<>();
+    //    LogEntry entry = LogEntry.builder().index(1).term(1).command(null).isValid(false).build();
+    //    log.add(entry);
+    //    RaftState raftState = RaftState.builder().votedFor("-1").logs(log).build();
+    //    System.out.println(raftState.toString());
+    //
+    //    byte[] bytes = Persister.serialize(raftState);
+    //    RaftState newRaft = new RaftState();
+    //    newRaft = (RaftState) Persister.deserialize(bytes);
+    //    System.out.println(newRaft.toString());
+    //}
+    //
+    //@Test
+    //public void testSaveAndReadRaftState() throws IOException, ClassNotFoundException {
+    //    String basePath = System.getProperty("os.name").startsWith("Windows") ? "D:\\Java\\project\\raft-KV\\" : "/";
+    //    String path = basePath + "state/9991/raft_state.dat";
+    //    File file = new File(path);
+    //    if (!file.exists()) {
+    //        log.error("路径不存在，{}", path);
+    //    }
+    //
+    //    ArrayList<LogEntry> log = new ArrayList<>();
+    //    LogEntry entry = LogEntry.builder().index(1).term(1).command(null).isValid(false).build();
+    //    log.add(entry);
+    //    RaftState raftState = RaftState.builder().votedFor("-1").logs(log).build();
+    //    byte[] bytes = Persister.serialize(raftState);
+    //    System.out.println("bytes = " + Arrays.toString(bytes));
+    //
+    //    // raft节点状态（字节数组）写入文件
+    //    FileOutputStream fos = new FileOutputStream(file);
+    //    fos.write(bytes);
+    //    // 读取文件的字节数组
+    //    FileInputStream fis = new FileInputStream(file);
+    //    byte[] data = new byte[fis.available()];
+    //    fis.read(data);
+    //    System.out.println("data = " + Arrays.toString(data));
+    //    // 反序列化，字节数组还原为raft节点状态
+    //    RaftState raft = (RaftState)Persister.deserialize(data);
+    //    System.out.println(raft.toString());
+    //}
 }

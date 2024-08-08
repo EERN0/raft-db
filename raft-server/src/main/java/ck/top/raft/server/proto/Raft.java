@@ -87,11 +87,10 @@ public class Raft {
         electionStart = System.currentTimeMillis();
         replicationTicker = new ReplicationTicker();
 
-        // 尾部日志第一条为无效的空日志，类似虚拟头节点，减少边界判断
-        logs = RaftLog.builder().snapshot(null).tailLog(new ArrayList<>())
-                .snapLastLogIdx(Constant.INVALID_LOG_INDEX).snapLastLogTerm(Constant.INVALID_LOG_TERM)
-                .build();
+        // 尾部日志tailLog的第一条为无效的空日志，类似虚拟头节点，减少边界判断
+        logs = logInit(Constant.INVALID_LOG_INDEX, Constant.INVALID_LOG_TERM, null, null);
         raftState = RaftState.builder().votedFor(votedFor).currentTerm(currentTerm).logs(logs).build();
+
     }
 
     public void start() {
@@ -283,6 +282,16 @@ public class Raft {
             log.error("日志索引 {} 越界 [{}, {}]", globalLogIdx, logs.getSnapLastLogIdx(), logs.getLength() - 1);
         }
         return globalLogIdx - logs.getSnapLastLogIdx();
+    }
+
+    public RaftLog logInit(int snapLastLogIdx, int snapLastLogTerm, byte[] snapshot, LogEntry[] entries) {
+        RaftLog rl = RaftLog.builder().snapLastLogIdx(snapLastLogIdx).snapLastLogTerm(snapLastLogTerm).snapshot(snapshot).build();
+
+        // 用快照snapshot的最后一条日志mock掉tailLog的第一个日志项
+        rl.getTailLog().add(LogEntry.builder().term(snapLastLogTerm).build());
+
+        rl.getTailLog().addAll(List.of(entries));
+        return rl;
     }
 
     /**
