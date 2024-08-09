@@ -278,6 +278,7 @@ public class Raft {
      * @return 尾部日志索引
      */
     public int global2tailLogIdx(int globalLogIdx) {
+        // TODO: 索引这一块有问题
         if (globalLogIdx < logs.getSnapLastLogIdx() || globalLogIdx >= logs.getLength()) {
             log.error("日志索引 {} 越界 [{}, {}]", globalLogIdx, logs.getSnapLastLogIdx(), logs.getLength() - 1);
         }
@@ -288,9 +289,12 @@ public class Raft {
         RaftLog rl = RaftLog.builder().snapLastLogIdx(snapLastLogIdx).snapLastLogTerm(snapLastLogTerm).snapshot(snapshot).build();
 
         // 用快照snapshot的最后一条日志mock掉tailLog的第一个日志项
-        rl.getTailLog().add(LogEntry.builder().term(snapLastLogTerm).build());
+        List<LogEntry> tailLog = new ArrayList<>();
+        tailLog.add(LogEntry.builder().index(snapLastLogIdx).term(snapLastLogTerm).build());
+        if (entries != null) tailLog.addAll(List.of(entries));
 
-        rl.getTailLog().addAll(List.of(entries));
+        rl.setTailLog(tailLog);
+
         return rl;
     }
 
